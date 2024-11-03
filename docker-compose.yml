@@ -1,0 +1,255 @@
+############################
+##  DEFAULT
+############################
+x-airflow-common:
+  &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.7.3}
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://admin:admin@db/airflow
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://admin:admin@db/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://admin:admin@db/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/config:/opt/airflow/config
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./util:/util
+  user: "${AIRFLOW_UID:-50000}:0"
+  
+services:
+############################
+##  DATA LAKE
+############################
+  minio:
+    image: minio/minio:latest
+    platform: linux/amd64
+    container_name: minio
+    entrypoint: sh
+    command:   '-c ''mkdir -p /minio_data/raw && mkdir -p /minio_data/trusted && minio server /minio_data --console-address ":9001"'''
+    ports:
+      - "9050:9000"
+      - "9051:9001"
+    hostname: minio
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ACCESS_KEY: datalake
+      MINIO_SECRET_KEY: datalake
+    volumes:
+      - ./minio/data1:/data
+
+############################
+## INGESTAO
+############################
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    platform: linux/amd64
+    hostname: airflow-webserver
+    command: webserver
+    ports:
+      - "58080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      - redis
+      - db
+      - airflow-scheduler
+      - airflow-worker
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    platform: linux/amd64
+    hostname: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      - redis
+      - db
+
+  airflow-worker:
+    <<: *airflow-common
+    container_name: airflow-worker
+    platform: linux/amd64
+    hostname: airflow-worker
+    command: celery worker
+    healthcheck:
+      # yamllint disable rule:line-length
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      # Required to handle warm shutdown of the celery workers properly
+      # See https://airflow.apache.org/docs/docker-stack/entrypoint.html#signal-propagation
+      DUMB_INIT_SETSID: "0"
+    depends_on:
+      - redis
+      - db
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow-triggerer
+    platform: linux/amd64
+    hostname: airflow-triggerer
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      - redis
+      - db
+
+  airflow-cli:
+    <<: *airflow-common
+    container_name: airflow-cli
+    platform: linux/amd64
+    hostname: airflow-cli
+    profiles:
+      - debug
+    environment:
+      <<: *airflow-common-env
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    # Workaround for entrypoint issue. See: https://github.com/apache/airflow/issues/16252
+    command:
+      - bash
+      - -c
+      - airflow
+
+  airflow-flower:
+    <<: *airflow-common
+    container_name: airflow-flower
+    platform: linux/amd64
+    hostname: airflow-flower
+    command: celery flower
+    profiles:
+      - flower
+    ports:
+      - "5555:5555"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+
+############################
+## DATABASE
+############################
+
+  redis:
+    image: redis:latest
+    platform: linux/amd64
+    container_name: redis
+    hostname: redis
+    expose:
+      - 6379
+    ports:
+        - 6379:6379
+    volumes:
+      - ./util:/util    
+
+  db:
+    image: postgres
+    platform: linux/amd64
+    container_name: db
+    hostname: db
+    environment:
+      POSTGRES_PASSWORD: admin
+      POSTGRES_USER: admin
+      POSTGRES_DB: admin
+    command: postgres -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=all -c max_connections=200 -c wal_level=logical
+    ports:
+      - 15432:5432
+    volumes:
+      - ./postgres/volume:/var/lib/postgresql/data
+      - ./util:/util
+
+  adminer:
+    image: adminer
+    platform: linux/amd64
+    container_name: adminer
+    hostname: adminer
+    ports:
+      - 28080:8080
+      
+
+
+############################
+## VISUALIZACAO
+############################
+
+  metabase:
+      image: metabase/metabase:latest
+      platform: linux/amd64
+      container_name: metabase
+      hostname: metabase
+      ports:
+        - 3000:3000
+      depends_on:
+        - db
+      environment:
+        MB_DB_TYPE: postgres
+        MB_DB_DBNAME: metabase
+        MB_DB_PORT: 5432
+        MB_DB_PASS: admin
+        MB_DB_USER: admin
+        MB_DB_HOST: db
+        MB_PASSWORD_COMPLEXITY: "weak"
+        MB_PASSWORD_LENGTH: 4
+        #user user@datalab.com.br pass datalab
+      volumes:
+        - ./util:/util
+
+
+  pgadmin:
+    container_name: pgadmin_container
+    image: dpage/pgadmin4
+    platform: linux/amd64
+    environment:
+      PGADMIN_DEFAULT_EMAIL: lab-pgadmin4@pgadmin.org
+      PGADMIN_DEFAULT_PASSWORD: admin    
+    ports:
+      - "5433:80"
+    depends_on:
+      - db  
+
+#############################
+## GENERAL
+  
+
+configs:
+  flags:
+    file: ./airbyte/flags.yml
+
+networks:
+  datalab:
+    driver: bridge
