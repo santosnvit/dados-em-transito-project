@@ -26,6 +26,48 @@ x-airflow-common:
   user: "${AIRFLOW_UID:-50000}:0"
   
 services:
+
+############################
+## DATABASE
+############################
+
+  redis:
+    image: redis:latest
+    platform: linux/amd64
+    container_name: redis
+    hostname: redis
+    expose:
+      - 6379
+    ports:
+        - 6379:6379
+    volumes:
+      - ./util:/util    
+
+  db:
+    image: postgres
+    platform: linux/amd64
+    container_name: db
+    hostname: db
+    environment:
+      POSTGRES_PASSWORD: admin
+      POSTGRES_USER: admin
+      POSTGRES_DB: admin
+    command: postgres -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=all -c max_connections=200 -c wal_level=logical
+    ports:
+      - 15432:5432
+    volumes:
+      - ./postgres/volume:/var/lib/postgresql/data
+      - ./util:/util
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  adminer:
+    image: adminer
+    platform: linux/amd64
+    container_name: adminer
+    hostname: adminer
+    ports:
+      - 28080:8080
+
 ############################
 ##  DATA LAKE
 ############################
@@ -161,45 +203,7 @@ services:
       start_period: 30s
 
 
-############################
-## DATABASE
-############################
 
-  redis:
-    image: redis:latest
-    platform: linux/amd64
-    container_name: redis
-    hostname: redis
-    expose:
-      - 6379
-    ports:
-        - 6379:6379
-    volumes:
-      - ./util:/util    
-
-  db:
-    image: postgres
-    platform: linux/amd64
-    container_name: db
-    hostname: db
-    environment:
-      POSTGRES_PASSWORD: admin
-      POSTGRES_USER: admin
-      POSTGRES_DB: admin
-    command: postgres -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=all -c max_connections=200 -c wal_level=logical
-    ports:
-      - 15432:5432
-    volumes:
-      - ./postgres/volume:/var/lib/postgresql/data
-      - ./util:/util
-
-  adminer:
-    image: adminer
-    platform: linux/amd64
-    container_name: adminer
-    hostname: adminer
-    ports:
-      - 28080:8080
       
 
 
