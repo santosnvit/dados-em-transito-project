@@ -203,11 +203,11 @@ services:
       start_period: 30s
 
   airflow-init:
-  <<: *airflow-common
-  container_name: airflow-init
-  command: ["airflow", "db", "init"]
-  depends_on:
-    - db
+    <<: *airflow-common
+    container_name: airflow-init
+    command: ["airflow", "db", "init"]
+    depends_on:
+      - db
 
 ############################
 ## VISUALIZACAO
